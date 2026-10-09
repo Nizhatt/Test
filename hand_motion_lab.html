@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#101827" />
+  <title>Hand Motion Lab</title>
+  <style>
+    :root { color-scheme: dark; --bg:#101827; --panel:#182337; --line:#2b3b55; --accent:#65e6c2; --text:#eef5ff; --muted:#a7b5c9; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); }
+    main { max-width:850px; margin:auto; padding:18px 14px 30px; }
+    h1 { margin:0 0 5px; font-size:1.55rem; }
+    .sub { margin:0 0 16px; color:var(--muted); font-size:.94rem; line-height:1.45; }
+    .stage { position:relative; overflow:hidden; border-radius:18px; background:#050a12; border:1px solid var(--line); aspect-ratio:3/4; max-height:72vh; margin:auto; }
+    video, canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+    canvas { pointer-events:none; }
+    .overlay { position:absolute; left:10px; right:10px; top:10px; display:flex; justify-content:space-between; gap:8px; pointer-events:none; }
+    .pill { background:#101827d9; border:1px solid #ffffff22; padding:7px 10px; border-radius:999px; font-size:.82rem; }
+    .controls { display:flex; gap:9px; flex-wrap:wrap; margin:13px 0; }
+    button, select { border:1px solid var(--line); border-radius:12px; padding:11px 14px; background:var(--panel); color:var(--text); font:inherit; }
+    button.primary { background:var(--accent); color:#06231c; border-color:transparent; font-weight:750; }
+    button:disabled { opacity:.5; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
+    .card { border:1px solid var(--line); background:var(--panel); padding:13px; border-radius:14px; min-height:90px; }
+    .card h2 { font-size:.95rem; color:var(--muted); margin:0 0 8px; }
+    .value { font-size:1.08rem; font-weight:700; overflow-wrap:anywhere; }
+    .small { color:var(--muted); font-size:.83rem; line-height:1.45; margin-top:6px; }
+    #status { color:var(--muted); font-size:.9rem; margin:8px 2px 13px; }
+    .ok { color:var(--accent) !important; }
+    .error { color:#ff9f9f !important; }
+    details { margin-top:13px; color:var(--muted); font-size:.88rem; line-height:1.5; }
+    @media (min-width:650px) { .stage { aspect-ratio:16/10; max-height:none; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Hand Motion Lab</h1>
+  <p class="sub">Отслеживание обеих рук, распознавание жестов и движение кончиков пальцев — прямо в браузере.</p>
+
+  <div class="stage" id="stage">
+    <video id="video" playsinline muted></video>
+    <canvas id="canvas"></canvas>
+    <div class="overlay"><span class="pill" id="handsPill">Рук: 0 / 2</span><span class="pill" id="fpsPill">FPS: —</span></div>
+  </div>
+
+  <div class="controls">
+    <button class="primary" id="startBtn">Включить камеру</button>
+    <button id="stopBtn" disabled>Остановить</button>
+    <select id="cameraSelect" aria-label="Выбор камеры"><option value="user">Фронтальная камера</option><option value="environment">Основная камера</option></select>
+  </div>
+  <div id="status">Нажмите «Включить камеру» и разрешите доступ к камере.</div>
+
+  <div class="grid">
+    <section class="card"><h2>Левая рука</h2><div class="value" id="leftGesture">Не обнаружена</div><div class="small" id="leftMotion">Движение: —</div></section>
+    <section class="card"><h2>Правая рука</h2><div class="value" id="rightGesture">Не обнаружена</div><div class="small" id="rightMotion">Движение: —</div></section>
+    <section class="card"><h2>Распознано сейчас</h2><div class="value" id="summary">Ожидание камеры</div><div class="small">Модель распознаёт стандартные жесты; результат зависит от освещения и положения рук.</div></section>
+    <section class="card"><h2>Кончик указательного пальца</h2><div class="value" id="coords">—</div><div class="small">Координаты нормализованы от 0 до 1. X и Y — положение на изображении; Z — относительная глубина.</div></section>
+  </div>
+  <details><summary>Какие жесты распознаются?</summary>
+    <p>Открытая ладонь, кулак, указательный палец вверх, знак V/победа, большой палец вверх или вниз, жест «I love you». Отслеживание движения показывает, движется ли кончик указательного пальца. Это демонстрационная версия, а не система медицинского или промышленного контроля.</p>
+  </details>
+</main>
+
+<script type="module">
+  import { FilesetResolver, GestureRecognizer, DrawingUtils } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const cameraSelect = document.getElementById('cameraSelect');
+  const statusEl = document.getElementById('status');
+  const handsPill = document.getElementById('handsPill');
+  const fpsPill = document.getElementById('fpsPill');
+  const drawingUtils = new DrawingUtils(ctx);
+
+  const connections = [
+    [0,1],[1,2],[2,3],[3,4], [0,5],[5,6],[6,7],[7,8], [5,9],[9,10],[10,11],[11,12],
+    [9,13],[13,14],[14,15],[15,16], [13,17],[17,18],[18,19],[19,20],[0,17]
+  ];
+  let recognizer = null;
+  let stream = null;
+  let running = false;
+  let lastVideoTime = -1;
+  let lastFrameAt = 0;
+  let fps = 0;
+  const previousTips = new Map();
+  const motionText = new Map();
+
+  function setStatus(message, kind='') {
+    statusEl.textContent = message;
+    statusEl.className = kind;
+  }
+
+  function prettyGesture(name) {
+    const names = {
+      Open_Palm: 'Открытая ладонь', Closed_Fist: 'Кулак', Pointing_Up: 'Указательный палец',
+      Victory: 'V / Победа', Thumb_Up: 'Большой палец вверх', Thumb_Down: 'Большой палец вниз',
+      ILoveYou: 'I love you', None: 'Жест не распознан'
+    };
+    return names[name] || (name ? name.replaceAll('_',' ') : 'Жест не распознан');
+  }
+
+  async function loadRecognizer() {
+    if (recognizer) return recognizer;
+    setStatus('Загружаю модель распознавания…');
+    const vision = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+    );
+    recognizer = await GestureRecognizer.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
+        delegate: 'GPU'
+      },
+      runningMode: 'VIDEO',
+      numHands: 2,
+      minHandDetectionConfidence: 0.55,
+      minHandPresenceConfidence: 0.55,
+      minTrackingConfidence: 0.5
+    });
+    return recognizer;
+  }
+
+  async function startCamera() {
+    startBtn.disabled = true;
+    try {
+      await loadRecognizer();
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: cameraSelect.value }, width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+      video.srcObject = stream;
+      await video.play();
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      running = true;
+      stopBtn.disabled = false;
+      cameraSelect.disabled = true;
+      setStatus('Камера включена. Покажите руки целиком перед камерой.', 'ok');
+      lastVideoTime = -1;
+      requestAnimationFrame(renderLoop);
+    } catch (err) {
+      console.error(err);
+      let msg = err?.message || String(err);
+      if (err?.name === 'NotAllowedError') msg = 'Нет доступа к камере. Разрешите доступ к камере в настройках браузера.';
+      if (err?.name === 'NotFoundError') msg = 'Камера не найдена на устройстве.';
+      setStatus('Не удалось запустить: ' + msg + '. Откройте страницу через HTTPS и попробуйте снова.', 'error');
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      stream = null;
+    } finally {
+      startBtn.disabled = false;
+    }
+  }
+
+  function stopCamera() {
+    running = false;
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    stream = null;
+    video.pause();
+    video.srcObject = null;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    stopBtn.disabled = true;
+    cameraSelect.disabled = false;
+    handsPill.textContent = 'Рук: 0 / 2';
+    fpsPill.textContent = 'FPS: —';
+    document.getElementById('leftGesture').textContent = 'Не обнаружена';
+    document.getElementById('rightGesture').textContent = 'Не обнаружена';
+    document.getElementById('leftMotion').textContent = 'Движение: —';
+    document.getElementById('rightMotion').textContent = 'Движение: —';
+    document.getElementById('summary').textContent = 'Камера остановлена';
+    document.getElementById('coords').textContent = '—';
+    previousTips.clear(); motionText.clear();
+    setStatus('Камера остановлена.');
+  }
+
+  function renderLoop(now) {
+    if (!running) return;
+    if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+      }
+      const result = recognizer.recognizeForVideo(video, now);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const landmarksList = result.landmarks || [];
+      const handednessList = result.handedness || [];
+      const gesturesList = result.gestures || [];
+      const found = { Left: null, Right: null };
+      const seen = new Set();
+
+      landmarksList.forEach((landmarks, i) => {
+        const handInfo = handednessList[i]?.[0];
+        const side = handInfo?.categoryName || `Hand${i+1}`;
+        const gestureCategory = gesturesList[i]?.[0];
+        const gesture = gestureCategory?.categoryName || 'None';
+        const confidence = gestureCategory?.score;
+        found[side] = { gesture, confidence, landmarks };
+        seen.add(side);
+
+        drawingUtils.drawConnectors(landmarks, connections, { color: '#65e6c2', lineWidth: 4 });
+        drawingUtils.drawLandmarks(landmarks, { color: '#ffffff', fillColor: '#168bff', lineWidth: 1, radius: 4 });
+
+        const tip = landmarks[8];
+        const key = side;
+        const prev = previousTips.get(key);
+        let movement = 'почти неподвижен';
+        if (prev) {
+          const dx = tip.x - prev.x;
+          const dy = tip.y - prev.y;
+          const distance = Math.sqrt(dx*dx + dy*dy);
+          if (distance > 0.018) movement = dx > 0.012 ? 'движется вправо' : dx < -0.012 ? 'движется влево' : dy > 0.012 ? 'движется вниз' : 'движется вверх';
+        }
+        previousTips.set(key, { x: tip.x, y: tip.y });
+        motionText.set(side, movement);
+
+        const px = tip.x * canvas.width;
+        const py = tip.y * canvas.height;
+        ctx.beginPath(); ctx.arc(px, py, 10, 0, Math.PI * 2); ctx.fillStyle = '#ffcc55'; ctx.fill();
+        ctx.lineWidth = 3; ctx.strokeStyle = '#172033'; ctx.stroke();
+        const label = `${side === 'Left' ? 'Левая' : side === 'Right' ? 'Правая' : side}: ${prettyGesture(gesture)}`;
+        ctx.font = 'bold 22px system-ui';
+        const labelX = Math.max(8, Math.min(px + 12, canvas.width - 300));
+        const labelY = Math.max(28, py - 16);
+        ctx.fillStyle = '#101827dd'; ctx.fillRect(labelX - 5, labelY - 23, Math.min(310, ctx.measureText(label).width + 12), 31);
+        ctx.fillStyle = '#ffffff'; ctx.fillText(label, labelX, labelY);
+      });
+
+      for (const side of ['Left','Right']) {
+        const prefix = side === 'Left' ? 'left' : 'right';
+        const item = found[side];
+        document.getElementById(prefix + 'Gesture').textContent = item ? `${prettyGesture(item.gesture)}${Number.isFinite(item.confidence) ? ` (${Math.round(item.confidence*100)}%)` : ''}` : 'Не обнаружена';
+        document.getElementById(prefix + 'Motion').textContent = 'Движение кончика: ' + (item ? (motionText.get(side) || '—') : '—');
+      }
+      handsPill.textContent = `Рук: ${landmarksList.length} / 2`;
+      const active = Object.entries(found).filter(([,v]) => v).map(([side,v]) => `${side === 'Left' ? 'Левая' : 'Правая'}: ${prettyGesture(v.gesture)}`);
+      document.getElementById('summary').textContent = active.length ? active.join(' · ') : 'Руки не обнаружены';
+      const first = found.Left || found.Right;
+      if (first) {
+        const p = first.landmarks[8];
+        document.getElementById('coords').textContent = `X ${p.x.toFixed(3)} · Y ${p.y.toFixed(3)} · Z ${p.z.toFixed(3)}`;
+      } else document.getElementById('coords').textContent = '—';
+
+      if (lastFrameAt) {
+        const instant = 1000 / Math.max(1, now - lastFrameAt);
+        fps = fps ? fps * 0.85 + instant * 0.15 : instant;
+        fpsPill.textContent = `FPS: ${Math.round(fps)}`;
+      }
+      lastFrameAt = now;
+      lastVideoTime = video.currentTime;
+    }
+    requestAnimationFrame(renderLoop);
+  }
+
+  startBtn.addEventListener('click', startCamera);
+  stopBtn.addEventListener('click', stopCamera);
+  cameraSelect.addEventListener('change', () => { if (running) startCamera(); });
+  window.addEventListener('pagehide', () => { if (stream) stream.getTracks().forEach(track => track.stop()); });
+</script>
+</body>
+</html>
